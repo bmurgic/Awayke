@@ -12,17 +12,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let powerManager = PowerManager()
     private let helper = HelperManager.shared
     private let displayKeeper = DisplayWakeKeeper()
+    private let clamshellKeeper = ClamshellWakeKeeper()
     private let batteryMonitor = BatteryMonitor()
     private let autoOffTimer = AutoOffTimer()
     private let lidMonitor = LidMonitor()
     private let lidSession = LidSessionTracker()
+    private var statusInteractionView: StatusItemInteractionView?
 
+    private lazy var wakeModeController = WakeModeController(
+        assertions: displayKeeper,
+        clamshell: clamshellKeeper,
+        fallback: powerManager
+    )
+    private lazy var statusInteractionController = StatusItemInteractionController(
+        onAction: { [weak self] action in
+            self?.handleStatusClick(action)
+        },
+        onContextMenu: { [weak self] in
+            self?.showMenu()
+        }
+    )
     private let thresholdDefaultsKey = "autoOffThreshold"
     private let thresholdOptions = [0, 10, 20, 30]
     private let durationOptions = [15, 30, 60, 120]
 
-    /// The user's intent: do they want Awayke on?
-    private var intent = false
+    /// The user's requested mode, retained while battery auto-off is active.
+    private var intentMode = WakeMode.off
     /// Battery auto-off is currently holding Awayke off.
     private var suspendedForBattery = false
     /// The user turned Awayke on while already below the floor. Auto-off
@@ -30,9 +45,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var overrideBattery = false
     /// Most recent battery reading, for re-evaluating on threshold change.
     private var lastSnapshot: BatterySnapshot?
-    /// A pmset round-trip is outstanding. Guards against overlapping
-    /// calls - on the osascript fallback path each one is a separate
-    /// admin password prompt.
+    /// A wake-mode transition is outstanding. Guards against overlapping
+    /// operations and duplicate admin prompts on the fallback path.
     private var powerChangeInFlight = false
     /// A session can end while a battery-driven pmset change is still in
     /// flight. Remember that event so it is not lost.
@@ -57,7 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// What is actually applied to the system.
-    private var effectiveActive: Bool { intent && !suspendedForBattery }
+    private var effectiveMode: WakeMode { wakeModeController.mode }
+    private var effectiveActive: Bool { effectiveMode.isActive }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -70,8 +85,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = item.button {
             button.target = self
-            button.action = #selector(handleClick(_:))
-            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            button.action = #selector(handleAccessibleActivation(_:))
+
+            let interactionView = StatusItemInteractionView(
+                frame: button.bounds,
+                controller: statusInteractionController
+            )
+            interactionView.autoresizingMask = [.width, .height]
+            button.addSubview(interactionView)
+            statusInteractionView = interactionView
         }
 
         refreshStatusItem()
@@ -108,68 +130,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Never leave the system with sleep disabled. Defer termination
-        // until the helper (or osascript fallback) finishes flipping
-        // pmset back off, so the main run loop stays alive for any auth
-        // UI the fallback path may need to show.
+        // Never leave a wake override active. Defer termination until a
+        // fallback pmset cleanup finishes, so the main run loop stays alive
+        // for any authentication UI the fallback may need to show.
         guard effectiveActive else { return .terminateNow }
 
-        powerManager.disableSleep(false) { _ in
+        wakeModeController.apply(.off) { _ in
             DispatchQueue.main.async {
-                self.displayKeeper.allow()
                 NSApp.reply(toApplicationShouldTerminate: true)
             }
         }
         return .terminateLater
     }
 
-    @objc private func handleClick(_ sender: NSStatusBarButton) {
-        if NSApp.currentEvent?.type == .rightMouseUp {
-            showMenu()
-        } else {
-            setIntent(!effectiveActive)
-        }
+    @objc private func handleAccessibleActivation(_ sender: NSStatusBarButton) {
+        statusInteractionController.receiveAccessibleActivation()
+    }
+
+    private func handleStatusClick(_ action: StatusClickAction) {
+        setMode(effectiveMode.target(after: action))
     }
 
     // MARK: - State application
 
-    /// Manual on/off. Always clears any battery suspension - the user
-    /// overrides the auto-off machine.
+    /// Applies a user-requested mode. Always clears any battery suspension,
+    /// because an explicit activation overrides the auto-off machine.
     ///
     /// - Parameters:
     ///   - timerMinutes: Arms the auto-off countdown for this many minutes.
     ///   - untilLidReopens: Ends after a lid close/open cycle.
     ///
-    /// With neither session option, turning on is indefinite.
-    private func setIntent(_ on: Bool,
-                           timerMinutes: Int? = nil,
-                           untilLidReopens: Bool = false) {
+    /// With neither session option, an active mode is indefinite.
+    private func setMode(_ mode: WakeMode,
+                         timerMinutes: Int? = nil,
+                         untilLidReopens: Bool = false) {
         guard !powerChangeInFlight else { return }
         powerChangeInFlight = true
 
-        powerManager.disableSleep(on) { [weak self] result in
+        wakeModeController.apply(mode) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.powerChangeInFlight = false
                 switch result {
                 case .success:
-                    self.intent = on
+                    self.intentMode = mode
                     self.suspendedForBattery = false
                     // Only an "on" issued while already below the floor
                     // counts as an override. Turning on at a healthy
                     // charge leaves auto-off armed for the discharge.
-                    self.overrideBattery = on && self.isBelowFloor
-                    if on, untilLidReopens {
+                    self.overrideBattery = mode.isActive && self.isBelowFloor
+                    if mode.isActive, untilLidReopens {
                         self.autoOffTimer.cancel()
                         self.lidSession.start(lidClosed: self.lidMonitor.isClosed)
-                    } else if on, let minutes = timerMinutes {
+                    } else if mode.isActive, let minutes = timerMinutes {
                         self.lidSession.cancel()
                         self.autoOffTimer.start(minutes: minutes)
                     } else {
                         self.autoOffTimer.cancel()
                         self.lidSession.cancel()
                     }
-                    self.syncDisplayKeeper()
                     self.refreshStatusItem()
                 case .failure(let error):
                     self.presentError(error)
@@ -196,17 +215,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func endSession(reason: SessionEndReason) {
         autoOffTimer.cancel()
         lidSession.cancel()
-        guard intent else { return }
+        guard intentMode.isActive else { return }
 
         // Battery auto-off already re-enabled sleep, so there is nothing
         // to undo at the system level - just clear the state. Avoids a
         // redundant pmset round-trip (and an admin prompt on the
         // osascript fallback path).
         guard !suspendedForBattery else {
-            intent = false
+            intentMode = .off
             suspendedForBattery = false
             overrideBattery = false
-            syncDisplayKeeper()
             refreshStatusItem()
             notify(title: "Awayke turned off", body: reason.notificationBody)
             return
@@ -218,21 +236,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         powerChangeInFlight = true
 
-        powerManager.disableSleep(false) { [weak self] result in
+        wakeModeController.apply(.off) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.powerChangeInFlight = false
                 switch result {
                 case .success:
-                    self.intent = false
+                    self.intentMode = .off
                     self.overrideBattery = false
-                    self.syncDisplayKeeper()
                     self.refreshStatusItem()
                     self.notify(title: "Awayke turned off", body: reason.notificationBody)
                 case .failure(let error):
-                    // Do not claim the session ended if pmset could not be
-                    // restored. The icon remains active and the error makes
-                    // the failed safety action visible to the user.
+                    // Do not claim the session ended if the active wake
+                    // mechanism could not be restored. The icon remains
+                    // active and the error makes the failed safety action
+                    // visible to the user.
                     //
                     // LidSessionTracker.handle already cleared itself when it
                     // reported the reopen, so without this the session is gone
@@ -256,16 +274,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endSession(reason: reason)
     }
 
-    private func syncDisplayKeeper() {
-        if effectiveActive { displayKeeper.prevent() } else { displayKeeper.allow() }
-    }
-
     private func handleBattery(_ snapshot: BatterySnapshot) {
         lastSnapshot = snapshot
         overrideBattery = AutoOffPolicy.shouldKeepOverride(overrideBattery, onAC: snapshot.onAC)
 
         let action = AutoOffPolicy.decide(
-            intent: intent,
+            intent: intentMode.isActive,
             suspended: suspendedForBattery,
             overridden: overrideBattery,
             percent: snapshot.percent,
@@ -274,14 +288,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         guard action != .none else { return }
 
-        // Power notifications arrive faster than a pmset round-trip
+        // Power notifications arrive faster than a wake-mode transition
         // completes. Drop this one - the in-flight completion
         // re-evaluates against the newest reading.
         guard !powerChangeInFlight else { return }
         powerChangeInFlight = true
 
         let suspending = (action == .suspend)
-        powerManager.disableSleep(!suspending) { [weak self] result in
+        let targetMode = suspending ? WakeMode.off : intentMode
+        wakeModeController.apply(targetMode) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.powerChangeInFlight = false
@@ -291,7 +306,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
 
                 self.suspendedForBattery = suspending
-                self.syncDisplayKeeper()
                 self.refreshStatusItem()
                 if suspending {
                     self.notify(title: "Awayke turned off",
@@ -323,12 +337,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             stateTitle = "Paused (low battery)"
         } else if effectiveActive, lidSession.isActive {
             stateTitle = lidSession.isWaitingForClose
-                ? "Active - waiting for lid to close"
-                : "Active - until lid reopens"
+                ? "Lid-closed mode - waiting for lid to close"
+                : "Lid-closed mode - until lid reopens"
         } else if effectiveActive, let remaining = autoOffTimer.remaining {
-            stateTitle = "Active - \(formatRemaining(remaining)) left"
+            stateTitle = "Lid-closed mode - \(formatRemaining(remaining)) left"
         } else {
-            stateTitle = effectiveActive ? "Active" : "Inactive"
+            switch effectiveMode {
+            case .off:
+                stateTitle = "Off"
+            case .openLid:
+                stateTitle = "Open-lid mode"
+            case .lidClosed:
+                stateTitle = "Lid-closed mode"
+            }
         }
         let stateItem = NSMenuItem(title: stateTitle, action: nil, keyEquivalent: "")
         stateItem.isEnabled = false
@@ -450,36 +471,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if minutes > 0 {
             requestNotificationAuthorization()
         }
-
-        // Already on: just (re)arm the countdown. Skipping the pmset
-        // round-trip keeps the osascript fallback from asking for an
-        // admin password to set a state the system is already in.
-        guard effectiveActive else {
-            setIntent(true, timerMinutes: minutes > 0 ? minutes : nil)
-            return
-        }
-
-        if minutes > 0 {
-            lidSession.cancel()
-            autoOffTimer.start(minutes: minutes)
-        } else {
-            autoOffTimer.cancel()
-            lidSession.cancel()
-        }
-        refreshStatusItem()
+        setMode(.lidClosed, timerMinutes: minutes > 0 ? minutes : nil)
     }
 
     @objc private func menuKeepAwakeUntilLidReopens() {
         requestNotificationAuthorization()
-
-        guard effectiveActive else {
-            setIntent(true, untilLidReopens: true)
-            return
-        }
-
-        autoOffTimer.cancel()
-        lidSession.start(lidClosed: lidMonitor.isClosed)
-        refreshStatusItem()
+        setMode(.lidClosed, untilLidReopens: true)
     }
 
     @objc private func menuSetThreshold(_ sender: NSMenuItem) {
@@ -528,38 +525,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshStatusItem() {
         guard let button = statusItem?.button else { return }
-        guard let base = NSImage(named: "StatusIcon") else { return }
-        base.size = NSSize(width: 16, height: 14)
-
-        if effectiveActive {
-            button.image = orangeTinted(base)
-        } else {
-            base.isTemplate = true
-            button.image = base
-        }
+        button.image = StatusIconRenderer.image(for: effectiveMode)
         button.contentTintColor = nil
         button.title = ""
         if suspendedForBattery {
             button.toolTip = "Awayke paused - battery below \(threshold)%. Plug in to resume."
-        } else if effectiveActive, lidSession.isActive {
+        } else if effectiveMode == .lidClosed, lidSession.isActive {
             button.toolTip = lidSession.isWaitingForClose
-                ? "Awayke is on - it will turn off after the lid is closed and reopened."
-                : "Awayke is on - it will turn off when the lid is reopened."
-        } else if effectiveActive, let remaining = autoOffTimer.remaining {
-            button.toolTip = "Awayke is on - turning off in \(formatRemaining(remaining))."
+                ? "Awayke Lid-closed mode is on - it will turn off after the lid is closed and reopened."
+                : "Awayke Lid-closed mode is on - it will turn off when the lid is reopened."
+        } else if effectiveMode == .lidClosed, let remaining = autoOffTimer.remaining {
+            button.toolTip = "Awayke Lid-closed mode is on - turning off in \(formatRemaining(remaining))."
         } else {
-            button.toolTip = effectiveActive ? "Awayke is on!" : "Awayke is off. Click to turn it on."
+            switch effectiveMode {
+            case .off:
+                button.toolTip = "Awayke is off. Single-click for Open-lid mode; double-click for Lid-closed mode."
+            case .openLid:
+                button.toolTip = "Awayke Open-lid mode is on. Single-click to turn off; double-click for Lid-closed mode."
+            case .lidClosed:
+                button.toolTip = "Awayke Lid-closed mode is on. Single-click or double-click to turn off."
+            }
         }
-    }
-
-    private func orangeTinted(_ source: NSImage) -> NSImage {
-        let image = source.copy() as! NSImage
-        image.isTemplate = false
-        image.lockFocus()
-        NSColor(red: 1, green: 0.6, blue: 0.1, alpha: 1).set()
-        NSRect(origin: .zero, size: image.size).fill(using: .sourceAtop)
-        image.unlockFocus()
-        return image
+        statusInteractionView?.toolTip = button.toolTip
     }
 
     private func presentError(_ error: Error) {

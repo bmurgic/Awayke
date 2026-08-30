@@ -2,33 +2,79 @@
 //  DisplayWakeKeeper.swift
 //  Awayke
 //
-//  Holds an IOPMAssertion that prevents display sleep, screen saver,
-//  and auto-lock while Awayke is active. Same mechanism as
-//  `caffeinate -d`. Released automatically if the app exits.
+//  Holds ordinary IOPM assertions while Awayke is active. These keep an open
+//  Mac awake without changing the separate lid-close sleep policy.
 //
 
+import Foundation
 import IOKit.pwr_mgt
 
-final class DisplayWakeKeeper {
+enum WakeAssertionError: LocalizedError {
+    case creationFailed(name: String, code: IOReturn)
 
-    private var assertionID: IOPMAssertionID = 0
+    var errorDescription: String? {
+        switch self {
+        case .creationFailed(let name, let code):
+            return "Couldn't create the \(name) wake assertion (IOKit \(code))."
+        }
+    }
+}
 
-    func prevent() {
-        guard assertionID == 0 else { return }
-        let result = IOPMAssertionCreateWithName(
+final class DisplayWakeKeeper: WakeAssertionControlling {
+
+    private var systemAssertionID: IOPMAssertionID = 0
+    private var displayAssertionID: IOPMAssertionID = 0
+
+    func prevent() -> Result<Void, Error> {
+        guard systemAssertionID == 0 || displayAssertionID == 0 else {
+            return .success(())
+        }
+
+        allow()
+
+        let systemResult = IOPMAssertionCreateWithName(
+            kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "Awayke is keeping the Mac awake" as CFString,
+            &systemAssertionID
+        )
+        guard systemResult == kIOReturnSuccess else {
+            systemAssertionID = 0
+            return .failure(WakeAssertionError.creationFailed(
+                name: "system-sleep",
+                code: systemResult
+            ))
+        }
+
+        let displayResult = IOPMAssertionCreateWithName(
             kIOPMAssertPreventUserIdleDisplaySleep as CFString,
             IOPMAssertionLevel(kIOPMAssertionLevelOn),
-            "Awayke is active" as CFString,
-            &assertionID
+            "Awayke is keeping the display awake" as CFString,
+            &displayAssertionID
         )
-        if result != kIOReturnSuccess {
-            assertionID = 0
+        guard displayResult == kIOReturnSuccess else {
+            allow()
+            return .failure(WakeAssertionError.creationFailed(
+                name: "display-sleep",
+                code: displayResult
+            ))
         }
+
+        return .success(())
     }
 
     func allow() {
-        guard assertionID != 0 else { return }
-        IOPMAssertionRelease(assertionID)
-        assertionID = 0
+        if displayAssertionID != 0 {
+            IOPMAssertionRelease(displayAssertionID)
+            displayAssertionID = 0
+        }
+        if systemAssertionID != 0 {
+            IOPMAssertionRelease(systemAssertionID)
+            systemAssertionID = 0
+        }
+    }
+
+    deinit {
+        allow()
     }
 }

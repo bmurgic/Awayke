@@ -23,7 +23,7 @@ enum PowerManagerError: LocalizedError {
     }
 }
 
-final class PowerManager {
+final class PowerManager: SleepFallbackControlling {
 
     private let helper: HelperManager
 
@@ -32,17 +32,27 @@ final class PowerManager {
     }
 
     func disableSleep(_ disable: Bool, completion: @escaping (Result<Void, Error>) -> Void) {
+        let mainCompletion: (Result<Void, Error>) -> Void = { result in
+            if Thread.isMainThread {
+                completion(result)
+                return
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+
         if helper.isUsable {
             Task {
                 do {
                     try await helper.setSleepDisabled(disable)
-                    completion(.success(()))
+                    mainCompletion(.success(()))
                 } catch {
-                    self.disableSleepViaOsascript(disable, completion: completion)
+                    self.disableSleepViaOsascript(disable, completion: mainCompletion)
                 }
             }
         } else {
-            disableSleepViaOsascript(disable, completion: completion)
+            disableSleepViaOsascript(disable, completion: mainCompletion)
         }
     }
 
