@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IOKit.pwr_mgt
 
 var failures = 0
 
@@ -69,6 +70,58 @@ checkBool(AutoOffPolicy.shouldKeepOverride(true, onAC: true), false, "override e
 
 // nothing to keep when there was no override
 checkBool(AutoOffPolicy.shouldKeepOverride(false, onAC: false), false, "no override stays no override")
+
+let displayPreferenceSuite = "AwaykeTests.keepDisplaysAwake.\(UUID().uuidString)"
+let displayPreferenceDefaults = UserDefaults(suiteName: displayPreferenceSuite)!
+displayPreferenceDefaults.removePersistentDomain(forName: displayPreferenceSuite)
+defer {
+    displayPreferenceDefaults.removePersistentDomain(forName: displayPreferenceSuite)
+}
+
+let defaultDisplayPreference = KeepDisplaysAwakePreference(
+    defaults: displayPreferenceDefaults
+)
+checkBool(defaultDisplayPreference.value, true,
+          "keep-displays-awake preference defaults on")
+defaultDisplayPreference.value = false
+let reloadedDisplayPreference = KeepDisplaysAwakePreference(
+    defaults: displayPreferenceDefaults
+)
+checkBool(reloadedDisplayPreference.value, false,
+          "keep-displays-awake preference persists off")
+
+var nextAssertionID: IOPMAssertionID = 1
+var assertionReleaseAttempts: [IOPMAssertionID] = []
+var shouldFailDisplayRelease = true
+let releaseFailureKeeper = DisplayWakeKeeper(
+    createAssertion: { _, _, _, assertionID in
+        assertionID.pointee = nextAssertionID
+        nextAssertionID += 1
+        return kIOReturnSuccess
+    },
+    releaseAssertion: { assertionID in
+        assertionReleaseAttempts.append(assertionID)
+        if assertionID == 2, shouldFailDisplayRelease {
+            return kIOReturnError
+        }
+        return kIOReturnSuccess
+    }
+)
+_ = releaseFailureKeeper.prevent(shouldKeepDisplayAwake: true)
+var displayReleaseFailureReported = false
+if case .failure = releaseFailureKeeper.updateDisplayAssertion(
+    shouldKeepDisplayAwake: false
+) {
+    displayReleaseFailureReported = true
+}
+checkBool(displayReleaseFailureReported, true,
+          "display assertion release failure is reported")
+shouldFailDisplayRelease = false
+_ = releaseFailureKeeper.updateDisplayAssertion(
+    shouldKeepDisplayAwake: false
+)
+checkBool(assertionReleaseAttempts.filter { $0 == 2 }.count == 2, true,
+          "failed display assertion release remains retryable")
 
 // A lid session started while open waits for a close, then expires on open.
 let openStart = LidSessionTracker()
@@ -250,16 +303,35 @@ enum TestWakeError: Error {
 
 final class FakeWakeAssertions: WakeAssertionControlling {
     var preventResult: Result<Void, Error> = .success(())
+    var updateDisplayResult: Result<Void, Error> = .success(())
     private(set) var preventCount = 0
     private(set) var allowCount = 0
+    private(set) var isPreventingSystemIdleSleep = false
+    private(set) var isKeepingDisplayAwake = false
 
-    func prevent() -> Result<Void, Error> {
+    func prevent(shouldKeepDisplayAwake: Bool) -> Result<Void, Error> {
         preventCount += 1
+        if case .success = preventResult {
+            isPreventingSystemIdleSleep = true
+            isKeepingDisplayAwake = shouldKeepDisplayAwake
+        }
         return preventResult
+    }
+
+    func updateDisplayAssertion(
+        shouldKeepDisplayAwake: Bool
+    ) -> Result<Void, Error> {
+        guard case .success = updateDisplayResult else {
+            return updateDisplayResult
+        }
+        isKeepingDisplayAwake = shouldKeepDisplayAwake
+        return .success(())
     }
 
     func allow() {
         allowCount += 1
+        isPreventingSystemIdleSleep = false
+        isKeepingDisplayAwake = false
     }
 }
 
@@ -295,12 +367,14 @@ final class FakeSleepFallback: SleepFallbackControlling {
 func makeWakeController(
     assertions: FakeWakeAssertions = FakeWakeAssertions(),
     clamshell: FakeClamshellSleep = FakeClamshellSleep(),
-    fallback: FakeSleepFallback = FakeSleepFallback()
+    fallback: FakeSleepFallback = FakeSleepFallback(),
+    shouldKeepDisplayAwake: Bool = true
 ) -> (WakeModeController, FakeWakeAssertions, FakeClamshellSleep, FakeSleepFallback) {
     let controller = WakeModeController(
         assertions: assertions,
         clamshell: clamshell,
-        fallback: fallback
+        fallback: fallback,
+        shouldKeepDisplayAwake: shouldKeepDisplayAwake
     )
     return (controller, assertions, clamshell, fallback)
 }
@@ -309,6 +383,8 @@ let openMode = makeWakeController()
 openMode.0.apply(.openLid) { _ in }
 checkWakeMode(openMode.0.mode, .openLid, "open-lid activation updates applied mode")
 checkBool(openMode.1.preventCount == 1, true, "open-lid activation starts assertions")
+checkBool(openMode.1.isKeepingDisplayAwake, true,
+          "open-lid mode keeps displays awake by default")
 checkBool(openMode.2.preventCount == 0, true, "open-lid activation leaves clamshell sleep alone")
 checkBool(openMode.3.calls.isEmpty, true, "open-lid activation does not use fallback")
 openMode.0.apply(.off) { _ in }
@@ -319,6 +395,8 @@ let primaryClosedMode = makeWakeController()
 primaryClosedMode.0.apply(.lidClosed) { _ in }
 checkWakeMode(primaryClosedMode.0.mode, .lidClosed, "primary clamshell activation updates mode")
 checkBool(primaryClosedMode.1.preventCount == 1, true, "lid-closed activation starts assertions")
+checkBool(primaryClosedMode.1.isKeepingDisplayAwake, true,
+          "lid-closed mode keeps displays awake by default")
 checkBool(primaryClosedMode.2.preventCount == 1, true, "lid-closed activation applies selector")
 checkBool(primaryClosedMode.3.calls.isEmpty, true, "working selector skips fallback")
 primaryClosedMode.0.apply(.off) { _ in }
@@ -384,6 +462,78 @@ checkBool(closedFailureReported, true, "clamshell activation failure is reported
 checkWakeMode(failedClosedMode.0.mode, .off, "failed lid-closed activation stays off")
 checkBool(failedClosedMode.1.allowCount == 1, true, "failed lid-closed activation rolls back assertions")
 checkBool(failedClosedMode.2.allowCount == 1, true, "failed lid-closed activation restores selector")
+
+let displaySleepOpenMode = makeWakeController(shouldKeepDisplayAwake: false)
+displaySleepOpenMode.0.apply(.openLid) { _ in }
+checkBool(displaySleepOpenMode.1.isPreventingSystemIdleSleep, true,
+          "open-lid display sleep keeps system idle assertion")
+checkBool(displaySleepOpenMode.1.isKeepingDisplayAwake, false,
+          "open-lid display sleep omits display assertion")
+
+let displaySleepClosedMode = makeWakeController(shouldKeepDisplayAwake: false)
+displaySleepClosedMode.0.apply(.lidClosed) { _ in }
+checkBool(displaySleepClosedMode.1.isPreventingSystemIdleSleep, true,
+          "lid-closed display sleep keeps system idle assertion")
+checkBool(displaySleepClosedMode.1.isKeepingDisplayAwake, false,
+          "lid-closed display sleep omits display assertion")
+checkBool(displaySleepClosedMode.2.preventCount == 1, true,
+          "lid-closed display sleep keeps clamshell override")
+
+var liveDisplayUpdateSucceeded = false
+displaySleepClosedMode.0.setShouldKeepDisplayAwake(true) { result in
+    if case .success = result { liveDisplayUpdateSucceeded = true }
+}
+checkBool(liveDisplayUpdateSucceeded, true,
+          "active display policy update succeeds")
+checkBool(displaySleepClosedMode.0.shouldKeepDisplayAwake, true,
+          "active display policy update records preference")
+checkBool(displaySleepClosedMode.1.isKeepingDisplayAwake, true,
+          "active display policy update starts display assertion")
+checkWakeMode(displaySleepClosedMode.0.mode, .lidClosed,
+              "active display policy update preserves wake mode")
+checkBool(displaySleepClosedMode.2.preventCount == 1, true,
+          "active display policy update does not repeat clamshell override")
+
+var liveDisplaySleepUpdateSucceeded = false
+displaySleepClosedMode.0.setShouldKeepDisplayAwake(false) { result in
+    if case .success = result { liveDisplaySleepUpdateSucceeded = true }
+}
+checkBool(liveDisplaySleepUpdateSucceeded, true,
+          "active display sleep update succeeds")
+checkBool(displaySleepClosedMode.1.isPreventingSystemIdleSleep, true,
+          "active display sleep update keeps system idle assertion")
+checkBool(displaySleepClosedMode.1.isKeepingDisplayAwake, false,
+          "active display sleep update releases display assertion")
+checkWakeMode(displaySleepClosedMode.0.mode, .lidClosed,
+              "active display sleep update preserves wake mode")
+checkBool(displaySleepClosedMode.2.preventCount == 1, true,
+          "active display sleep update does not repeat clamshell override")
+
+let inactiveDisplayPolicyMode = makeWakeController()
+inactiveDisplayPolicyMode.0.setShouldKeepDisplayAwake(false) { _ in }
+inactiveDisplayPolicyMode.0.apply(.openLid) { _ in }
+checkBool(inactiveDisplayPolicyMode.1.isPreventingSystemIdleSleep, true,
+          "inactive display policy keeps next mode awake")
+checkBool(inactiveDisplayPolicyMode.1.isKeepingDisplayAwake, false,
+          "inactive display policy applies to next mode")
+
+let failedDisplayUpdateAssertions = FakeWakeAssertions()
+let failedDisplayUpdateMode = makeWakeController(
+    assertions: failedDisplayUpdateAssertions,
+    shouldKeepDisplayAwake: false
+)
+failedDisplayUpdateMode.0.apply(.openLid) { _ in }
+failedDisplayUpdateAssertions.updateDisplayResult = .failure(TestWakeError.failed)
+var displayUpdateFailureReported = false
+failedDisplayUpdateMode.0.setShouldKeepDisplayAwake(true) { result in
+    if case .failure = result { displayUpdateFailureReported = true }
+}
+checkBool(displayUpdateFailureReported, true,
+          "failed display policy update is reported")
+checkBool(failedDisplayUpdateMode.0.shouldKeepDisplayAwake, false,
+          "failed display policy update retains previous preference")
+checkWakeMode(failedDisplayUpdateMode.0.mode, .openLid,
+              "failed display policy update preserves wake mode")
 
 if failures > 0 {
     print("\(failures) failing")

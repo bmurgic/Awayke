@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let powerManager = PowerManager()
     private let helper = HelperManager.shared
     private let displayKeeper = DisplayWakeKeeper()
+    private let keepDisplaysAwakePreference = KeepDisplaysAwakePreference()
     private let clamshellKeeper = ClamshellWakeKeeper()
     private let batteryMonitor = BatteryMonitor()
     private let autoOffTimer = AutoOffTimer()
@@ -22,7 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var wakeModeController = WakeModeController(
         assertions: displayKeeper,
         clamshell: clamshellKeeper,
-        fallback: powerManager
+        fallback: powerManager,
+        shouldKeepDisplayAwake: keepDisplaysAwakePreference.value
     )
     private lazy var statusInteractionController = StatusItemInteractionController(
         onAction: { [weak self] action in
@@ -356,6 +358,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
 
         menu.addItem(keepAwakeSubmenuItem())
+        menu.addItem(keepDisplaysAwakeMenuItem())
         menu.addItem(autoOffSubmenuItem())
 
         if let helperRow = helperStatusMenuItem() {
@@ -431,6 +434,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return rest == 0 ? "\(hours)h" : "\(hours)h \(rest)m"
     }
 
+    private func keepDisplaysAwakeMenuItem() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "Keep displays awake",
+            action: #selector(menuToggleKeepDisplaysAwake),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.state = keepDisplaysAwakePreference.value ? .on : .off
+        return item
+    }
+
     private func autoOffSubmenuItem() -> NSMenuItem {
         let parent = NSMenuItem(title: "Auto-off on low battery", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
@@ -475,6 +489,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func menuKeepAwakeUntilLidReopens() {
         requestNotificationAuthorization()
         setMode(.lidClosed, untilLidReopens: true)
+    }
+
+    @objc private func menuToggleKeepDisplaysAwake() {
+        guard !powerChangeInFlight else { return }
+
+        let shouldKeepDisplayAwake = !keepDisplaysAwakePreference.value
+        wakeModeController.setShouldKeepDisplayAwake(
+            shouldKeepDisplayAwake
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success:
+                self.keepDisplaysAwakePreference.value = shouldKeepDisplayAwake
+            case .failure(let error):
+                self.presentError(error)
+            }
+        }
     }
 
     @objc private func menuSetThreshold(_ sender: NSMenuItem) {

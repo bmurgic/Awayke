@@ -1,7 +1,10 @@
 import Foundation
 
 protocol WakeAssertionControlling: AnyObject {
-    func prevent() -> Result<Void, Error>
+    func prevent(shouldKeepDisplayAwake: Bool) -> Result<Void, Error>
+    func updateDisplayAssertion(
+        shouldKeepDisplayAwake: Bool
+    ) -> Result<Void, Error>
     func allow()
 }
 
@@ -29,15 +32,18 @@ final class WakeModeController {
     private let fallback: SleepFallbackControlling
 
     private(set) var mode = WakeMode.off
+    private(set) var shouldKeepDisplayAwake: Bool
     private var isFallbackActive = false
     private var isTransitioning = false
 
     init(assertions: WakeAssertionControlling,
          clamshell: ClamshellSleepControlling,
-         fallback: SleepFallbackControlling) {
+         fallback: SleepFallbackControlling,
+         shouldKeepDisplayAwake: Bool = true) {
         self.assertions = assertions
         self.clamshell = clamshell
         self.fallback = fallback
+        self.shouldKeepDisplayAwake = shouldKeepDisplayAwake
     }
 
     func apply(_ target: WakeMode,
@@ -62,12 +68,46 @@ final class WakeModeController {
         }
     }
 
+    func setShouldKeepDisplayAwake(
+        _ shouldKeepDisplayAwake: Bool,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard !isTransitioning else {
+            completion(.failure(WakeModeControllerError.transitionInProgress))
+            return
+        }
+        guard shouldKeepDisplayAwake != self.shouldKeepDisplayAwake else {
+            completion(.success(()))
+            return
+        }
+        guard mode.isActive else {
+            self.shouldKeepDisplayAwake = shouldKeepDisplayAwake
+            completion(.success(()))
+            return
+        }
+
+        isTransitioning = true
+        switch assertions.updateDisplayAssertion(
+            shouldKeepDisplayAwake: shouldKeepDisplayAwake
+        ) {
+        case .success:
+            self.shouldKeepDisplayAwake = shouldKeepDisplayAwake
+            isTransitioning = false
+            completion(.success(()))
+        case .failure(let error):
+            isTransitioning = false
+            completion(.failure(error))
+        }
+    }
+
     private func activateOpenLid(
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         switch mode {
         case .off:
-            switch assertions.prevent() {
+            switch assertions.prevent(
+                shouldKeepDisplayAwake: shouldKeepDisplayAwake
+            ) {
             case .success:
                 finish(mode: .openLid, completion: completion)
             case .failure(let error):
@@ -85,7 +125,9 @@ final class WakeModeController {
     ) {
         let previousMode = mode
         if previousMode == .off {
-            if case .failure(let error) = assertions.prevent() {
+            if case .failure(let error) = assertions.prevent(
+                shouldKeepDisplayAwake: shouldKeepDisplayAwake
+            ) {
                 finish(error: error, completion: completion)
                 return
             }
