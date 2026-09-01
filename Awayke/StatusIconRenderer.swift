@@ -2,13 +2,13 @@ import AppKit
 
 enum StatusIconRenderer {
     private static let svgViewportSize: CGFloat = 24
-    private static let iconWidth: CGFloat = 24
-    private static let iconHeight: CGFloat = 22
+    private static let iconWidth: CGFloat = 22
+    private static let iconHeight: CGFloat = 20
     private static let iconSize = NSSize(
         width: iconWidth,
         height: iconHeight
     )
-    private static let svgScale: CGFloat = 1
+    private static let svgScale: CGFloat = 0.9
     private static let horizontalOffset = (iconWidth - svgViewportSize * svgScale) / 2
     private static let verticalOffset = (iconHeight - svgViewportSize * svgScale) / 2
     private static let strokeWidth: CGFloat = 1.5 * svgScale
