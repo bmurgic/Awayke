@@ -71,34 +71,50 @@ enum StatusIconRenderer {
     private static func makeScreenPath() -> NSBezierPath {
         let path = NSBezierPath()
 
-        path.move(to: point(x: 3.49609, y: 17))
-        path.line(to: point(x: 3.49609, y: 10))
+        path.move(to: point(x: 3.49609, y: 7.6))
         path.curve(
-            to: point(x: 4.37477, y: 4.87868),
-            controlPoint1: point(x: 3.49609, y: 7.17157),
-            controlPoint2: point(x: 3.49609, y: 5.75736)
+            to: point(x: 4.02609, y: 4.53),
+            controlPoint1: point(x: 3.49609, y: 5.9),
+            controlPoint2: point(x: 3.49609, y: 5.06)
         )
         path.curve(
-            to: point(x: 9.49609, y: 4),
-            controlPoint1: point(x: 5.25345, y: 4),
-            controlPoint2: point(x: 6.66767, y: 4)
+            to: point(x: 7.09609, y: 4),
+            controlPoint1: point(x: 4.55609, y: 4),
+            controlPoint2: point(x: 5.39609, y: 4)
         )
-        path.line(to: point(x: 14.4961, y: 4))
+        path.line(to: point(x: 16.8961, y: 4))
         path.curve(
-            to: point(x: 19.6174, y: 4.87868),
-            controlPoint1: point(x: 17.3245, y: 4),
-            controlPoint2: point(x: 18.7387, y: 4)
+            to: point(x: 19.9661, y: 4.53),
+            controlPoint1: point(x: 18.5961, y: 4),
+            controlPoint2: point(x: 19.4361, y: 4)
         )
         path.curve(
-            to: point(x: 20.4961, y: 10),
-            controlPoint1: point(x: 20.4961, y: 5.75736),
-            controlPoint2: point(x: 20.4961, y: 7.17157)
+            to: point(x: 20.4961, y: 7.6),
+            controlPoint1: point(x: 20.4961, y: 5.06),
+            controlPoint2: point(x: 20.4961, y: 5.9)
         )
-        path.line(to: point(x: 20.4961, y: 17))
-        path.line(to: point(x: 15.4961, y: 17))
-        path.line(to: point(x: 15.4961, y: 17.9))
-        path.line(to: point(x: 8.49609, y: 17.9))
-        path.line(to: point(x: 8.49609, y: 17))
+        path.line(to: point(x: 20.4961, y: 10.4))
+        path.curve(
+            to: point(x: 19.9661, y: 13.47),
+            controlPoint1: point(x: 20.4961, y: 12.1),
+            controlPoint2: point(x: 20.4961, y: 12.94)
+        )
+        path.curve(
+            to: point(x: 16.8961, y: 14),
+            controlPoint1: point(x: 19.4361, y: 14),
+            controlPoint2: point(x: 18.5961, y: 14)
+        )
+        path.line(to: point(x: 7.09609, y: 14))
+        path.curve(
+            to: point(x: 4.02609, y: 13.47),
+            controlPoint1: point(x: 5.39609, y: 14),
+            controlPoint2: point(x: 4.55609, y: 14)
+        )
+        path.curve(
+            to: point(x: 3.49609, y: 10.4),
+            controlPoint1: point(x: 3.49609, y: 12.94),
+            controlPoint2: point(x: 3.49609, y: 12.1)
+        )
         path.close()
 
         return makeBezierPath(from: path, lineCapStyle: .round)
