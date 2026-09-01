@@ -79,8 +79,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         helper.register()
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        // Tightens the horizontal slot around the icon.
-        item.length = 14
         statusItem = item
 
         if let button = item.button {
@@ -524,8 +522,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Status item rendering
 
     private func refreshStatusItem() {
-        guard let button = statusItem?.button else { return }
-        button.image = StatusIconRenderer.image(for: effectiveMode)
+        guard let statusItem, let button = statusItem.button else { return }
+        let image = StatusIconRenderer.image(for: effectiveMode)
+        statusItem.length = image.size.width
+        button.image = image
         button.contentTintColor = nil
         button.title = ""
         if suspendedForBattery {
