@@ -2,12 +2,14 @@ import AppKit
 
 enum StatusIconRenderer {
     private static let svgViewportSize: CGFloat = 24
-    private static let iconSideLength: CGFloat = 18
+    private static let iconWidth: CGFloat = 20
+    private static let iconHeight: CGFloat = 18
     private static let iconSize = NSSize(
-        width: iconSideLength,
-        height: iconSideLength
+        width: iconWidth,
+        height: iconHeight
     )
-    private static let svgScale = iconSideLength / svgViewportSize
+    private static let svgScale = iconHeight / svgViewportSize
+    private static let horizontalOffset = (iconWidth - iconHeight) / 2
     private static let strokeWidth: CGFloat = 1.5 * svgScale
 
     private static let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
@@ -167,8 +169,8 @@ enum StatusIconRenderer {
 
     private static func point(x: CGFloat, y: CGFloat) -> NSPoint {
         NSPoint(
-            x: x * svgScale,
-            y: iconSideLength - y * svgScale
+            x: horizontalOffset + x * svgScale,
+            y: iconHeight - y * svgScale
         )
     }
 }
