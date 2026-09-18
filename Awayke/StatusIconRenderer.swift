@@ -13,12 +13,32 @@ enum StatusIconRenderer {
     private static let verticalOffset = (iconHeight - svgViewportSize * svgScale) / 2
     private static let strokeWidth: CGFloat = 1.5 * svgScale
 
-    private static let white = NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
-    private static let subtleGray = NSColor(
-        srgbRed: 184 / 255,
-        green: 186 / 255,
-        blue: 196 / 255,
-        alpha: 1
+    /// Screen and base colors for the non-purple modes, picked to read
+    /// against the current menu bar background.
+    private struct NeutralPalette {
+        let screen: NSColor
+        let base: NSColor
+    }
+
+    private static let lightPalette = NeutralPalette(
+        screen: NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1),
+        base: NSColor(
+            srgbRed: 184 / 255,
+            green: 186 / 255,
+            blue: 196 / 255,
+            alpha: 1
+        )
+    )
+
+    /// Used when the menu bar behind the icon is light.
+    private static let darkPalette = NeutralPalette(
+        screen: NSColor(srgbRed: 0, green: 0, blue: 0, alpha: 1),
+        base: NSColor(
+            srgbRed: 78 / 255,
+            green: 80 / 255,
+            blue: 90 / 255,
+            alpha: 1
+        )
     )
     private static let screenPurple = NSColor(
         srgbRed: 203 / 255,
@@ -33,7 +53,11 @@ enum StatusIconRenderer {
         alpha: 1
     )
 
-    static func image(for mode: WakeMode) -> NSImage {
+    static func image(for mode: WakeMode, appearance: NSAppearance?) -> NSImage {
+        let isDarkMenuBar = (appearance ?? NSAppearance.currentDrawing())
+            .bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let palette = isDarkMenuBar ? lightPalette : darkPalette
+
         let image = NSImage(size: iconSize, flipped: false) { _ in
             NSGraphicsContext.current?.shouldAntialias = true
 
@@ -42,11 +66,11 @@ enum StatusIconRenderer {
 
             switch mode {
             case .off:
-                drawStroke(screenPath, color: white)
-                drawFillAndStroke(basePath, color: subtleGray)
+                drawStroke(screenPath, color: palette.screen)
+                drawFillAndStroke(basePath, color: palette.base)
             case .openLid:
-                drawFillAndStroke(screenPath, color: white)
-                drawFillAndStroke(basePath, color: subtleGray)
+                drawFillAndStroke(screenPath, color: palette.screen)
+                drawFillAndStroke(basePath, color: palette.base)
             case .lidClosed:
                 drawFillAndStroke(screenPath, color: screenPurple)
                 drawFillAndStroke(basePath, color: basePurple)

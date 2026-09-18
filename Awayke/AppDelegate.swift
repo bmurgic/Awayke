@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let lidMonitor = LidMonitor()
     private let lidSession = LidSessionTracker()
     private var statusInteractionView: StatusItemInteractionView?
+    private var appearanceObservation: NSKeyValueObservation?
 
     private lazy var wakeModeController = WakeModeController(
         assertions: displayKeeper,
@@ -94,6 +95,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             interactionView.autoresizingMask = [.width, .height]
             button.addSubview(interactionView)
             statusInteractionView = interactionView
+
+            // The menu bar can be light or dark independently of the system
+            // appearance, so redraw the icon whenever the button's appearance
+            // resolves differently.
+            appearanceObservation = button.observe(\.effectiveAppearance) { [weak self] _, _ in
+                self?.refreshStatusItem()
+            }
         }
 
         refreshStatusItem()
@@ -555,7 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func refreshStatusItem() {
         guard let statusItem, let button = statusItem.button else { return }
-        let image = StatusIconRenderer.image(for: effectiveMode)
+        let image = StatusIconRenderer.image(for: effectiveMode, appearance: button.effectiveAppearance)
         statusItem.length = image.size.width
         button.image = image
         button.contentTintColor = nil
