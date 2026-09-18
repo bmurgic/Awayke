@@ -441,6 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         item.target = self
+        item.offStateImage = NSImage(size: item.onStateImage.size)
         item.state = keepDisplaysAwakePreference.value ? .on : .off
         return item
     }
