@@ -153,6 +153,72 @@ checkBool(unknownStart.isWaitingForClose, true, "unknown-start session waits for
 checkBool(unknownStart.handle(lidClosed: true), false, "unknown-start close arms session end")
 checkBool(unknownStart.handle(lidClosed: false), true, "unknown-start reopen expires session")
 
+// An idle session expires once the system reports N minutes without input.
+var fakeIdleSeconds: TimeInterval = 0
+var idleExpiries = 0
+let idle = IdleSession(idleSeconds: { fakeIdleSeconds })
+var expiredMinutes: Int?
+idle.onExpire = { minutes in
+    idleExpiries += 1
+    expiredMinutes = minutes
+}
+idle.start(minutes: 15)
+checkBool(idle.isActive, true, "started idle session is active")
+checkBool(idle.idleMinutes == 15, true, "idle session reports its length")
+fakeIdleSeconds = 15 * 60 - 1
+idle.check()
+checkBool(idleExpiries == 0, true, "idle session does not expire below its length")
+fakeIdleSeconds = 15 * 60
+idle.check()
+checkBool(idleExpiries == 1, true, "idle session expires at its length")
+checkBool(expiredMinutes == 15, true, "idle expiry reports the session length")
+checkBool(idle.isActive, false, "expired idle session is inactive")
+idle.check()
+checkBool(idleExpiries == 1, true, "idle session expires only once")
+
+// New input lowers the reported idle time, which restarts the wait.
+let resetIdle = IdleSession(idleSeconds: { fakeIdleSeconds })
+var resetExpiries = 0
+resetIdle.onExpire = { _ in resetExpiries += 1 }
+resetIdle.start(minutes: 5)
+fakeIdleSeconds = 4 * 60
+resetIdle.check()
+fakeIdleSeconds = 10
+resetIdle.check()
+fakeIdleSeconds = 4 * 60
+resetIdle.check()
+checkBool(resetExpiries == 0, true, "input resets the idle wait")
+resetIdle.cancel()
+
+let cancelledIdle = IdleSession(idleSeconds: { fakeIdleSeconds })
+var cancelledExpiries = 0
+cancelledIdle.onExpire = { _ in cancelledExpiries += 1 }
+cancelledIdle.start(minutes: 5)
+cancelledIdle.cancel()
+fakeIdleSeconds = 60 * 60
+cancelledIdle.check()
+checkBool(cancelledExpiries == 0, true, "cancelled idle session does not expire")
+checkBool(cancelledIdle.idleMinutes == nil, true, "cancelled idle session clears its length")
+
+// Restarting with a new length replaces the old one.
+let restartedIdle = IdleSession(idleSeconds: { fakeIdleSeconds })
+var restartedExpiries = 0
+restartedIdle.onExpire = { _ in restartedExpiries += 1 }
+restartedIdle.start(minutes: 5)
+restartedIdle.start(minutes: 30)
+fakeIdleSeconds = 10 * 60
+restartedIdle.check()
+checkBool(restartedExpiries == 0, true, "restarted idle session uses the new length")
+checkBool(restartedIdle.idleMinutes == 30, true, "restarted idle session reports the new length")
+restartedIdle.cancel()
+
+// The timer remembers its length so the menu can check the running preset.
+let presetTimer = AutoOffTimer()
+presetTimer.start(minutes: 30)
+checkBool(presetTimer.minutes == 30, true, "running timer reports its length")
+presetTimer.cancel()
+checkBool(presetTimer.minutes == nil, true, "cancelled timer clears its length")
+
 func checkWakeMode(_ actual: WakeMode, _ expected: WakeMode, _ name: String) {
     if actual == expected {
         print("ok - \(name)")

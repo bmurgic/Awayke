@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let clamshellKeeper = ClamshellWakeKeeper()
     private let batteryMonitor = BatteryMonitor()
     private let autoOffTimer = AutoOffTimer()
+    private let idleSession = IdleSession()
     private let lidMonitor = LidMonitor()
     private let lidSession = LidSessionTracker()
     private var statusInteractionView: StatusItemInteractionView?
@@ -38,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let thresholdDefaultsKey = "autoOffThreshold"
     private let thresholdOptions = [0, 10, 20, 30]
     private let durationOptions = [15, 30, 60, 120]
+    private let idleOptions = [5, 15, 30]
 
     /// The user's requested mode, retained while battery auto-off is active.
     private var intentMode = WakeMode.off
@@ -55,14 +57,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// flight. Remember that event so it is not lost.
     private var pendingSessionEnd: SessionEndReason?
 
+    /// How an active mode ends. Exactly one applies at a time.
+    private enum Session: Equatable {
+        case indefinite
+        case timer(minutes: Int)
+        case untilLidReopens
+        case untilIdle(minutes: Int)
+    }
+
     private enum SessionEndReason {
         case timer
         case lidReopened
+        case idle(minutes: Int)
 
         var notificationBody: String {
             switch self {
             case .timer: return "Timer finished."
             case .lidReopened: return "The lid was reopened."
+            case .idle(let minutes): return "No activity for \(minutes) minutes."
             }
         }
     }
@@ -128,6 +140,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Keeps the tooltip's remaining-time readout live.
         autoOffTimer.onTick = { [weak self] in self?.refreshStatusItem() }
 
+        idleSession.onExpire = { [weak self] minutes in
+            self?.endSession(reason: .idle(minutes: minutes))
+        }
+
         lidMonitor.onChange = { [weak self] closed in
             guard let self else { return }
             if self.lidSession.handle(lidClosed: closed) {
@@ -164,14 +180,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Applies a user-requested mode. Always clears any battery suspension,
     /// because an explicit activation overrides the auto-off machine.
     ///
-    /// - Parameters:
-    ///   - timerMinutes: Arms the auto-off countdown for this many minutes.
-    ///   - untilLidReopens: Ends after a lid close/open cycle.
-    ///
-    /// With neither session option, an active mode is indefinite.
-    private func setMode(_ mode: WakeMode,
-                         timerMinutes: Int? = nil,
-                         untilLidReopens: Bool = false) {
+    /// - Parameter session: How an active mode ends. Ignored when turning off.
+    private func setMode(_ mode: WakeMode, session: Session = .indefinite) {
         guard !powerChangeInFlight else { return }
         powerChangeInFlight = true
 
@@ -187,15 +197,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // counts as an override. Turning on at a healthy
                     // charge leaves auto-off armed for the discharge.
                     self.overrideBattery = mode.isActive && self.isBelowFloor
-                    if mode.isActive, untilLidReopens {
-                        self.autoOffTimer.cancel()
-                        self.lidSession.start(lidClosed: self.lidMonitor.isClosed)
-                    } else if mode.isActive, let minutes = timerMinutes {
-                        self.lidSession.cancel()
-                        self.autoOffTimer.start(minutes: minutes)
-                    } else {
-                        self.autoOffTimer.cancel()
-                        self.lidSession.cancel()
+                    self.cancelSessions()
+                    if mode.isActive {
+                        self.startSession(session)
                     }
                     self.refreshStatusItem()
                 case .failure(let error):
@@ -204,6 +208,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.processPendingSessionEnd()
             }
         }
+    }
+
+    private func startSession(_ session: Session) {
+        switch session {
+        case .indefinite:
+            break
+        case .timer(let minutes):
+            autoOffTimer.start(minutes: minutes)
+        case .untilLidReopens:
+            lidSession.start(lidClosed: lidMonitor.isClosed)
+        case .untilIdle(let minutes):
+            idleSession.start(minutes: minutes)
+        }
+    }
+
+    private func cancelSessions() {
+        autoOffTimer.cancel()
+        lidSession.cancel()
+        idleSession.cancel()
+    }
+
+    /// The running session, or nil while Awayke is not active.
+    private var activeSession: Session? {
+        guard effectiveActive else { return nil }
+        if lidSession.isActive { return .untilLidReopens }
+        if let minutes = autoOffTimer.minutes { return .timer(minutes: minutes) }
+        if let minutes = idleSession.idleMinutes { return .untilIdle(minutes: minutes) }
+        return .indefinite
     }
 
     /// Latest reading is on battery and under the configured floor.
@@ -217,12 +249,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         endSession(reason: .timer)
     }
 
-    /// Ends either kind of bounded session. This is intentionally shared by
-    /// timer and lid sessions so both interact identically with battery
+    /// Ends any kind of bounded session. This is intentionally shared by
+    /// timer, lid, and idle sessions so all interact identically with battery
     /// suspension and in-flight helper calls.
     private func endSession(reason: SessionEndReason) {
-        autoOffTimer.cancel()
-        lidSession.cancel()
+        cancelSessions()
         guard intentMode.isActive else { return }
 
         // Battery auto-off already re-enabled sleep, so there is nothing
@@ -265,7 +296,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // and nothing can ever end it. Re-arm so the next
                     // close/open cycle retries. A timer deadline has genuinely
                     // passed and has no duration to restore, so it does not
-                    // re-arm.
+                    // re-arm. Neither does an idle session: the user is still
+                    // idle, so it would fail again on the next check.
                     if case .lidReopened = reason {
                         self.lidSession.start(lidClosed: self.lidMonitor.isClosed)
                     }
@@ -349,6 +381,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : "Lid-closed mode - until lid reopens"
         } else if effectiveActive, let remaining = autoOffTimer.remaining {
             stateTitle = "Lid-closed mode - \(formatRemaining(remaining)) left"
+        } else if effectiveActive, let minutes = idleSession.idleMinutes {
+            stateTitle = "Lid-closed mode - until idle \(formatRemaining(TimeInterval(minutes) * 60))"
         } else {
             switch effectiveMode {
             case .off:
@@ -396,8 +430,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(menuKeepAwakeUntilLidReopens),
             keyEquivalent: ""
         )
+        let active = activeSession
         lidSessionItem.target = self
-        lidSessionItem.state = (effectiveActive && lidSession.isActive) ? .on : .off
+        lidSessionItem.state = (active == .untilLidReopens) ? .on : .off
         submenu.addItem(lidSessionItem)
 
         submenu.addItem(.separator())
@@ -407,8 +442,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                   action: #selector(menuKeepAwakeFor(_:)), keyEquivalent: "")
             item.target = self
             item.tag = value
+            item.state = (active == .timer(minutes: value)) ? .on : .off
             submenu.addItem(item)
         }
+
+        submenu.addItem(.separator())
+
+        submenu.addItem(untilIdleSubmenuItem(active: active))
 
         submenu.addItem(.separator())
 
@@ -417,9 +457,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                     action: #selector(menuKeepAwakeFor(_:)), keyEquivalent: "")
         indefinite.target = self
         indefinite.tag = 0
-        indefinite.state = (effectiveActive && !autoOffTimer.isRunning && !lidSession.isActive) ? .on : .off
+        indefinite.state = (active == .indefinite) ? .on : .off
         submenu.addItem(indefinite)
 
+        parent.submenu = submenu
+        return parent
+    }
+
+    private func untilIdleSubmenuItem(active: Session?) -> NSMenuItem {
+        let parent = NSMenuItem(title: "Until idle for", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for value in idleOptions {
+            let item = NSMenuItem(title: durationLabel(value),
+                                  action: #selector(menuKeepAwakeUntilIdle(_:)), keyEquivalent: "")
+            item.target = self
+            item.tag = value
+            item.state = (active == .untilIdle(minutes: value)) ? .on : .off
+            submenu.addItem(item)
+        }
+        if case .untilIdle = active {
+            parent.state = .on
+        }
         parent.submenu = submenu
         return parent
     }
@@ -492,12 +550,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if minutes > 0 {
             requestNotificationAuthorization()
         }
-        setMode(.lidClosed, timerMinutes: minutes > 0 ? minutes : nil)
+        setMode(.lidClosed, session: minutes > 0 ? .timer(minutes: minutes) : .indefinite)
     }
 
     @objc private func menuKeepAwakeUntilLidReopens() {
         requestNotificationAuthorization()
-        setMode(.lidClosed, untilLidReopens: true)
+        setMode(.lidClosed, session: .untilLidReopens)
+    }
+
+    @objc private func menuKeepAwakeUntilIdle(_ sender: NSMenuItem) {
+        requestNotificationAuthorization()
+        setMode(.lidClosed, session: .untilIdle(minutes: sender.tag))
     }
 
     @objc private func menuToggleKeepDisplaysAwake() {
@@ -576,6 +639,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 : "Awayke Lid-closed mode is on - it will turn off when the lid is reopened."
         } else if effectiveMode == .lidClosed, let remaining = autoOffTimer.remaining {
             button.toolTip = "Awayke Lid-closed mode is on - turning off in \(formatRemaining(remaining))."
+        } else if effectiveMode == .lidClosed, let minutes = idleSession.idleMinutes {
+            button.toolTip = "Awayke Lid-closed mode is on - it will turn off after \(minutes) minutes without keyboard or mouse input."
         } else {
             switch effectiveMode {
             case .off:

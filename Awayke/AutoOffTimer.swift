@@ -18,6 +18,8 @@ final class AutoOffTimer {
     var onTick: (() -> Void)?
 
     private(set) var deadline: Date?
+    /// The length the running countdown was started with.
+    private(set) var minutes: Int?
     private var ticker: Timer?
 
     var isRunning: Bool { deadline != nil }
@@ -30,6 +32,7 @@ final class AutoOffTimer {
 
     func start(minutes: Int) {
         cancel()
+        self.minutes = minutes
         deadline = Date().addingTimeInterval(TimeInterval(minutes) * 60)
 
         let ticker = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
@@ -44,6 +47,7 @@ final class AutoOffTimer {
         ticker?.invalidate()
         ticker = nil
         deadline = nil
+        minutes = nil
     }
 
     private func tick() {

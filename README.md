@@ -33,6 +33,7 @@ macOS puts your Mac to sleep when you close the lid. Awayke flips `pmset disable
 **Right-click** for a bounded session:
 
 - Stay active for 15min - 2h, or  until you close and reopen the lid
+- Or stay active until you've been idle for 5, 15, or 30 minutes. No keyboard or mouse input counts as idle, including while the lid is closed
 - Optional low-battery cutoff at 10%, 20%, or 30%
 - `Keep displays awake` is checked by default. Turn it off to let macOS run its normal screensaver and display sleep while Awayke keeps the Mac awake.
 
