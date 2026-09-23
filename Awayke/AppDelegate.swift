@@ -422,35 +422,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func keepAwakeSubmenuItem() -> NSMenuItem {
-        let parent = NSMenuItem(title: "Keep awayke for", action: nil, keyEquivalent: "")
+        let parent = NSMenuItem(title: "Keep awayke", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-
-        let lidSessionItem = NSMenuItem(
-            title: "Until lid is reopened",
-            action: #selector(menuKeepAwakeUntilLidReopens),
-            keyEquivalent: ""
-        )
         let active = activeSession
-        lidSessionItem.target = self
-        lidSessionItem.state = (active == .untilLidReopens) ? .on : .off
-        submenu.addItem(lidSessionItem)
-
-        submenu.addItem(.separator())
-
-        for value in durationOptions {
-            let item = NSMenuItem(title: durationLabel(value),
-                                  action: #selector(menuKeepAwakeFor(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = value
-            item.state = (active == .timer(minutes: value)) ? .on : .off
-            submenu.addItem(item)
-        }
-
-        submenu.addItem(.separator())
-
-        submenu.addItem(untilIdleSubmenuItem(active: active))
-
-        submenu.addItem(.separator())
 
         // Tag 0 means "no countdown" - on until turned off.
         let indefinite = NSMenuItem(title: "Indefinitely",
@@ -460,23 +434,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         indefinite.state = (active == .indefinite) ? .on : .off
         submenu.addItem(indefinite)
 
+        let lidSessionItem = NSMenuItem(
+            title: "Until lid is reopened",
+            action: #selector(menuKeepAwakeUntilLidReopens),
+            keyEquivalent: ""
+        )
+        lidSessionItem.target = self
+        lidSessionItem.state = (active == .untilLidReopens) ? .on : .off
+        submenu.addItem(lidSessionItem)
+
+        submenu.addItem(.separator())
+
+        submenu.addItem(presetSubmenuItem(
+            title: "Set timer for",
+            options: durationOptions,
+            action: #selector(menuKeepAwakeFor(_:)),
+            active: active,
+            session: { .timer(minutes: $0) }
+        ))
+        submenu.addItem(presetSubmenuItem(
+            title: "Until idle for",
+            options: idleOptions,
+            action: #selector(menuKeepAwakeUntilIdle(_:)),
+            active: active,
+            session: { .untilIdle(minutes: $0) }
+        ))
+
         parent.submenu = submenu
         return parent
     }
 
-    private func untilIdleSubmenuItem(active: Session?) -> NSMenuItem {
-        let parent = NSMenuItem(title: "Until idle for", action: nil, keyEquivalent: "")
+    /// A nested list of minute presets. The running preset and its parent
+    /// are both checked, so the kind of session shows without opening it.
+    private func presetSubmenuItem(title: String,
+                                   options: [Int],
+                                   action: Selector,
+                                   active: Session?,
+                                   session: (Int) -> Session) -> NSMenuItem {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        for value in idleOptions {
-            let item = NSMenuItem(title: durationLabel(value),
-                                  action: #selector(menuKeepAwakeUntilIdle(_:)), keyEquivalent: "")
+        for value in options {
+            let item = NSMenuItem(title: durationLabel(value), action: action, keyEquivalent: "")
             item.target = self
             item.tag = value
-            item.state = (active == .untilIdle(minutes: value)) ? .on : .off
+            item.state = (active == session(value)) ? .on : .off
+            if item.state == .on {
+                parent.state = .on
+            }
             submenu.addItem(item)
-        }
-        if case .untilIdle = active {
-            parent.state = .on
         }
         parent.submenu = submenu
         return parent
